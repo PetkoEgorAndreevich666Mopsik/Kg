@@ -1,0 +1,3 @@
+C:/Users/user/CLionProjects/KG3LABA/cmake-build-debug/CMakeFiles/KG3LABA.dir
+C:/Users/user/CLionProjects/KG3LABA/cmake-build-debug/CMakeFiles/edit_cache.dir
+C:/Users/user/CLionProjects/KG3LABA/cmake-build-debug/CMakeFiles/rebuild_cache.dir
