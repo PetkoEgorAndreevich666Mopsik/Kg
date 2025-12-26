@@ -11,6 +11,9 @@
 #include "../../Common/d3dApp.h"
 #include "../../Common/MathHelper.h"
 #include "../../Common/UploadBuffer.h"
+#define TINYOBJLOADER_IMPLEMENTATION
+#include "tiny_obj_loader.h"
+
 
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
@@ -75,7 +78,7 @@ private:
 
     float mTheta = 1.5f*XM_PI;
     float mPhi = XM_PIDIV4;
-    float mRadius = 5.0f;
+    float mRadius = 400.0f;
 
     POINT mLastMousePos;
 };
@@ -143,7 +146,7 @@ void BoxApp::OnResize()
 	D3DApp::OnResize();
 
     // The window resized, so update the aspect ratio and recompute the projection matrix.
-    XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 1000.0f);
+    XMMATRIX P = XMMatrixPerspectiveFovLH(0.25f*MathHelper::Pi, AspectRatio(), 1.0f, 100000.0f);
     XMStoreFloat4x4(&mProj, P);
 }
 
@@ -270,7 +273,7 @@ void BoxApp::OnMouseMove(WPARAM btnState, int x, int y)
         mRadius += dx - dy;
 
         // Restrict the radius.
-        mRadius = MathHelper::Clamp(mRadius, 3.0f, 15.0f);
+        mRadius = MathHelper::Clamp(mRadius, 3.0f, 1000.0f);
     }
 
     mLastMousePos.x = x;
@@ -363,47 +366,85 @@ void BoxApp::BuildShadersAndInputLayout()
 
 void BoxApp::BuildBoxGeometry()
 {
-    std::array<Vertex, 8> vertices =
+    // 1) Load OBJ (Sponza)
+    tinyobj::ObjReaderConfig reader_config;
+    // If your .mtl is in same folder, set this to that folder (optional if you ignore materials).
+    // reader_config.mtl_search_path = "Assets\\Sponza\\";
+
+    tinyobj::ObjReader reader;
+    if (!reader.ParseFromFile("sponza\\sponza.obj", reader_config))
     {
-        Vertex({ XMFLOAT3(-1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::White) }),
-		Vertex({ XMFLOAT3(-1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Black) }),
-		Vertex({ XMFLOAT3(+1.0f, +1.0f, -1.0f), XMFLOAT4(Colors::Red) }),
-		Vertex({ XMFLOAT3(+1.0f, -1.0f, -1.0f), XMFLOAT4(Colors::Green) }),
-		Vertex({ XMFLOAT3(-1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Blue) }),
-		Vertex({ XMFLOAT3(-1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Yellow) }),
-		Vertex({ XMFLOAT3(+1.0f, +1.0f, +1.0f), XMFLOAT4(Colors::Cyan) }),
-		Vertex({ XMFLOAT3(+1.0f, -1.0f, +1.0f), XMFLOAT4(Colors::Magenta) })
+        if (!reader.Error().empty())
+            OutputDebugStringA(reader.Error().c_str());
+        throw std::runtime_error("Failed to load OBJ");
+    }
+
+    const tinyobj::attrib_t& attrib = reader.GetAttrib();
+    const std::vector<tinyobj::shape_t>& shapes = reader.GetShapes();
+
+    // 2) Compute bounding box (for nice gradient vertex colors)
+    DirectX::XMFLOAT3 bmin(+FLT_MAX, +FLT_MAX, +FLT_MAX);
+    DirectX::XMFLOAT3 bmax(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+
+    for (size_t i = 0; i + 2 < attrib.vertices.size(); i += 3)
+    {
+        float x = attrib.vertices[i + 0];
+        float y = attrib.vertices[i + 1];
+        float z = attrib.vertices[i + 2];
+        bmin.x = (std::min)(bmin.x, x); bmin.y = (std::min)(bmin.y, y); bmin.z = (std::min)(bmin.z, z);
+        bmax.x = (std::max)(bmax.x, x); bmax.y = (std::max)(bmax.y, y); bmax.z = (std::max)(bmax.z, z);
+    }
+
+    auto safeInv = [](float d) { return (fabsf(d) < 1e-8f) ? 0.0f : (1.0f / d); };
+    float invX = safeInv(bmax.x - bmin.x);
+    float invY = safeInv(bmax.y - bmin.y);
+    float invZ = safeInv(bmax.z - bmin.z);
+
+    XMFLOAT3 center(
+        0.5f * (bmin.x + bmax.x),
+        0.5f * (bmin.y + bmax.y),
+        0.5f * (bmin.z + bmax.z));
+
+
+    // 3) Build a non-deduplicated vertex buffer (easy + reliable)
+    // Each OBJ index becomes one vertex; indices are 0..N-1
+    std::vector<Vertex> vertices;
+    std::vector<std::uint32_t> indices;
+
+    vertices.reserve(1000000); // optional
+    indices.reserve(1000000);  // optional
+
+    for (const auto& shape : shapes)
+    {
+        for (const auto& idx : shape.mesh.indices)
+        {
+            if (idx.vertex_index < 0) continue; // safety
+
+            Vertex v;
+
+            const int vi = 3 * idx.vertex_index;
+            float x = attrib.vertices[vi + 0];
+            float y = attrib.vertices[vi + 1];
+            float z = attrib.vertices[vi + 2];
+
+            v.Pos = DirectX::XMFLOAT3(x - center.x, y - center.y, z - center.z);
+
+            float nx = (x - bmin.x) * invX;
+            float ny = (y - bmin.y) * invY;
+            float nz = (z - bmin.z) * invZ;
+
+            // "Cube-like" colorful gradient across the model
+            v.Color = XMFLOAT4(nx, 0.6f, 1.0f - nx, 1.0f);
+
+            vertices.push_back(v);
+            indices.push_back((std::uint32_t)indices.size());
+        }
     };
 
-	std::array<std::uint16_t, 36> indices =
-	{
-		// front face
-		0, 1, 2,
-		0, 2, 3,
 
-		// back face
-		4, 6, 5,
-		4, 7, 6,
-
-		// left face
-		4, 5, 1,
-		4, 1, 0,
-
-		// right face
-		3, 2, 6,
-		3, 6, 7,
-
-		// top face
-		1, 5, 6,
-		1, 6, 2,
-
-		// bottom face
-		4, 0, 3,
-		4, 3, 7
-	};
 
     const UINT vbByteSize = (UINT)vertices.size() * sizeof(Vertex);
-	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint16_t);
+	const UINT ibByteSize = (UINT)indices.size() * sizeof(std::uint32_t);
 
 	mBoxGeo = std::make_unique<MeshGeometry>();
 	mBoxGeo->Name = "boxGeo";
@@ -422,7 +463,7 @@ void BoxApp::BuildBoxGeometry()
 
 	mBoxGeo->VertexByteStride = sizeof(Vertex);
 	mBoxGeo->VertexBufferByteSize = vbByteSize;
-	mBoxGeo->IndexFormat = DXGI_FORMAT_R16_UINT;
+	mBoxGeo->IndexFormat = DXGI_FORMAT_R32_UINT;
 	mBoxGeo->IndexBufferByteSize = ibByteSize;
 
 	SubmeshGeometry submesh;
@@ -434,7 +475,11 @@ void BoxApp::BuildBoxGeometry()
 }
 
 void BoxApp::BuildPSO()
-{
+{   
+    auto rs = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+    rs.CullMode = D3D12_CULL_MODE_NONE;
+    //psoDesc.RasterizerState = rs;
+
     D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc;
     ZeroMemory(&psoDesc, sizeof(D3D12_GRAPHICS_PIPELINE_STATE_DESC));
     psoDesc.InputLayout = { mInputLayout.data(), (UINT)mInputLayout.size() };
